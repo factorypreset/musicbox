@@ -397,6 +397,8 @@ impl DattorroReverb {
 /// filtering makes it decay like a plucked string.
 struct PluckVoice {
     delay: DelayLine,
+    /// The current period in samples (sets the pitch)
+    period: usize,
     /// One-pole LP state for the feedback filter (string damping)
     lp_state: f32,
     /// Feedback amount (0.0-1.0, higher = longer sustain)
@@ -409,6 +411,7 @@ impl PluckVoice {
     fn new(max_delay: usize) -> Self {
         Self {
             delay: DelayLine::new(max_delay),
+            period: max_delay,
             lp_state: 0.0,
             feedback: 0.996,
             active: false,
@@ -420,10 +423,11 @@ impl PluckVoice {
             return 0.0;
         }
 
-        let out = self.delay.read_at(self.delay.len() - 1);
+        // Read from the correct period offset — this is what sets the pitch
+        let out = self.delay.read_at(self.period);
 
         // Karplus-Strong averaging filter: average adjacent samples, then feedback
-        let prev = self.delay.read_at(self.delay.len() - 2);
+        let prev = self.delay.read_at(self.period - 1);
         let averaged = (out + prev) * 0.5;
 
         // One-pole LP for extra warmth
@@ -588,14 +592,15 @@ impl PluckEngine {
 
             // Fill the voice's delay with noise for the pluck
             let voice = &mut self.voices[voice_idx];
+            voice.period = period.min(voice.delay.len() - 1).max(2);
             for s in voice.delay.buffer.iter_mut() {
                 *s = 0.0;
             }
-            for i in 0..period.min(voice.delay.len()) {
+            for i in 0..voice.period {
                 let r = Self::xorshift(&mut self.rng_state);
                 voice.delay.buffer[i] = (r as f32) / (u64::MAX as f32) - 0.5;
             }
-            voice.delay.write_pos = period % voice.delay.len();
+            voice.delay.write_pos = voice.period;
             voice.lp_state = 0.0;
             voice.active = true;
 
