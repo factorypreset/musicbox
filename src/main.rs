@@ -214,6 +214,9 @@ impl DelayLine {
 }
 
 /// Dattorro plate reverb, ported from Mutable Instruments Clouds.
+/// Original: https://github.com/pichenettes/eurorack/blob/master/clouds/dsp/fx/reverb.h
+/// Copyright 2014 Émilie Gillet, licensed under MIT.
+///
 /// Topology: 4 input allpass diffusers → 2 cross-coupled tank branches
 /// with allpass filters, delay lines, LP damping, and LFO modulation.
 struct DattorroReverb {
