@@ -2,12 +2,13 @@ use wasm_bindgen::prelude::*;
 use musicbox_core::MusicBox;
 
 /// WASM wrapper around the MusicBox DSP engine.
-/// Holds the engine and reusable render buffers.
+/// Holds the engine and a persistent interleaved output buffer.
 #[wasm_bindgen]
 pub struct MusicBoxWeb {
     engine: MusicBox,
     left: Vec<f32>,
     right: Vec<f32>,
+    interleaved: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -19,28 +20,35 @@ impl MusicBoxWeb {
             engine: MusicBox::new(sample_rate, seed),
             left: Vec::new(),
             right: Vec::new(),
+            interleaved: Vec::new(),
         }
     }
 
-    /// Render `frames` stereo samples. Returns interleaved [L, R, L, R, ...] f32 data.
-    /// AudioWorkletProcessor.process() provides output buffers of 128 frames,
-    /// but we support arbitrary sizes.
-    pub fn render(&mut self, frames: usize) -> Vec<f32> {
-        // Resize internal buffers if needed
+    /// Render `frames` stereo samples into an internal buffer.
+    /// Call `output_ptr()` and `output_len()` to read the interleaved result.
+    pub fn render(&mut self, frames: usize) {
         if self.left.len() < frames {
             self.left.resize(frames, 0.0);
             self.right.resize(frames, 0.0);
+            self.interleaved.resize(frames * 2, 0.0);
         }
 
         self.engine.render(&mut self.left[..frames], &mut self.right[..frames]);
 
-        // Interleave for easy consumption in JS
-        let mut out = Vec::with_capacity(frames * 2);
         for i in 0..frames {
-            out.push(self.left[i]);
-            out.push(self.right[i]);
+            self.interleaved[i * 2] = self.left[i];
+            self.interleaved[i * 2 + 1] = self.right[i];
         }
-        out
+    }
+
+    /// Pointer to the interleaved output buffer in WASM memory.
+    pub fn output_ptr(&self) -> *const f32 {
+        self.interleaved.as_ptr()
+    }
+
+    /// Length of the interleaved output buffer (frames * 2).
+    pub fn output_len(&self) -> usize {
+        self.interleaved.len()
     }
 
     /// Signal the engine to begin fading out.

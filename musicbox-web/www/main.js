@@ -1,6 +1,6 @@
 let audioCtx = null;
 let workletNode = null;
-let wasmModule = null;
+let wasmBytes = null;
 
 const btn = document.getElementById("toggle");
 const status = document.getElementById("status");
@@ -10,12 +10,11 @@ function setStatus(text) {
 }
 
 async function loadWasm() {
-    if (wasmModule) return wasmModule;
+    if (wasmBytes) return wasmBytes;
     setStatus("Loading WASM...");
     const response = await fetch("pkg/musicbox_web_bg.wasm");
-    const bytes = await response.arrayBuffer();
-    wasmModule = await WebAssembly.compile(bytes);
-    return wasmModule;
+    wasmBytes = await response.arrayBuffer();
+    return wasmBytes;
 }
 
 async function start() {
@@ -23,7 +22,7 @@ async function start() {
     setStatus("Starting...");
 
     try {
-        const module = await loadWasm();
+        const bytes = await loadWasm();
 
         audioCtx = new AudioContext({ sampleRate: 44100 });
         await audioCtx.audioWorklet.addModule("worklet.js");
@@ -35,10 +34,15 @@ async function start() {
         workletNode.connect(audioCtx.destination);
 
         // Wait for worklet to signal ready
-        const ready = new Promise((resolve) => {
+        const ready = new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error("Worklet init timed out")), 10000);
             workletNode.port.onmessage = (event) => {
                 if (event.data.type === "ready") {
+                    clearTimeout(timeout);
                     resolve();
+                } else if (event.data.type === "error") {
+                    clearTimeout(timeout);
+                    reject(new Error(event.data.message));
                 } else if (event.data.type === "done") {
                     setStatus("Stopped.");
                     btn.textContent = "Play";
@@ -48,16 +52,18 @@ async function start() {
             };
         });
 
-        // Generate a random seed
-        const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+        // Generate a random seed as two 32-bit halves (avoids BigInt compatibility issues)
+        const seedHigh = Math.floor(Math.random() * 0xFFFFFFFF);
+        const seedLow = Math.floor(Math.random() * 0xFFFFFFFF);
 
-        // Send WASM module to worklet for synchronous instantiation
+        // Send raw WASM bytes to worklet (Safari can't postMessage compiled modules)
         workletNode.port.postMessage({
             type: "init",
             data: {
-                wasmModule: module,
+                wasmBytes: bytes,
                 sampleRate: audioCtx.sampleRate,
-                seed,
+                seedHigh,
+                seedLow,
             },
         });
 
