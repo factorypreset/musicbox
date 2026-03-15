@@ -23,53 +23,113 @@ async function loadWasm() {
     return wasmBytes;
 }
 
-// Build an SVG path string from time-domain audio data
-function buildWaveformPath(dataArray, bufferLength) {
-    const xMin = 40, xMax = 200;
-    const yCenter = 120, yRange = 80;
-    const step = bufferLength / 20; // sample ~20 points for a smooth path
+const NUM_POINTS = 21;
+const MORPH_MS = 300;
+const X_MIN = 40, X_MAX = 200, Y_CENTER = 120, Y_RANGE = 80;
 
+// Pre-compute the Y values for the static paths at our sample points
+function staticYValues(pathId) {
+    // Sample the static waveform at evenly spaced x positions
+    // Sine: smooth curve, Noise: jagged
+    if (pathId === "front") {
+        // Sine wave: y = 120 - 46*sin(x * 2.5pi / 160)
+        return Array.from({ length: NUM_POINTS }, (_, i) => {
+            const t = i / (NUM_POINTS - 1);
+            return Y_CENTER - 46 * Math.sin(t * 2.5 * Math.PI);
+        });
+    } else {
+        // Noise: sample the known static path y-values
+        const noiseY = [120, 89, 145, 78, 153, 95, 162, 83, 148, 74, 139, 92, 166, 80, 151, 90, 133, 74, 146, 98, 120];
+        return noiseY;
+    }
+}
+
+const staticFrontY = staticYValues("front");
+const staticBackY = staticYValues("back");
+
+function buildPath(yValues) {
     let d = "";
-    for (let i = 0; i <= 20; i++) {
-        const idx = Math.min(Math.floor(i * step), bufferLength - 1);
-        const sample = (dataArray[idx] / 128.0) - 1.0; // normalize to [-1, 1]
-        const x = xMin + (i / 20) * (xMax - xMin);
-        const y = yCenter - sample * yRange;
-        d += (i === 0 ? "M " : " L ") + x.toFixed(1) + " " + y.toFixed(1);
+    for (let i = 0; i < yValues.length; i++) {
+        const x = X_MIN + (i / (yValues.length - 1)) * (X_MAX - X_MIN);
+        d += (i === 0 ? "M " : " L ") + x.toFixed(1) + " " + yValues[i].toFixed(1);
     }
     return d;
 }
 
+function sampleLiveY(dataArray, bufferLength) {
+    const step = bufferLength / NUM_POINTS;
+    return Array.from({ length: NUM_POINTS }, (_, i) => {
+        const idx = Math.min(Math.floor(i * step), bufferLength - 1);
+        const sample = (dataArray[idx] / 128.0) - 1.0;
+        return Y_CENTER - sample * Y_RANGE;
+    });
+}
+
+function lerpArrays(a, b, t) {
+    return a.map((v, i) => v + (b[i] - v) * t);
+}
+
+let morphStartTime = 0;
+let morphDirection = 1; // 1 = morphing to live, -1 = morphing to static
+
 function startVisualization() {
     const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    morphStartTime = performance.now();
+    morphDirection = 1;
 
     function draw() {
         animFrameId = requestAnimationFrame(draw);
         analyser.getByteTimeDomainData(dataArray);
 
-        const path = buildWaveformPath(dataArray, dataArray.length);
+        const liveY = sampleLiveY(dataArray, dataArray.length);
 
-        // Update whichever sigil face(s) exist — both get live data
+        // Blend factor: 0 = static, 1 = fully live
+        const elapsed = performance.now() - morphStartTime;
+        const blend = Math.min(elapsed / MORPH_MS, 1.0);
+
+        const frontY = lerpArrays(staticFrontY, liveY, blend);
+        const backY = lerpArrays(staticBackY, liveY, blend);
+
         const frontPath = document.getElementById("sigil-wave-front");
         const backPath = document.getElementById("sigil-wave-back");
-        if (frontPath) frontPath.setAttribute("d", path);
-        if (backPath) backPath.setAttribute("d", path);
+        if (frontPath) frontPath.setAttribute("d", buildPath(frontY));
+        if (backPath) backPath.setAttribute("d", buildPath(backY));
     }
 
     draw();
 }
 
 function stopVisualization() {
-    if (animFrameId) {
-        cancelAnimationFrame(animFrameId);
-        animFrameId = null;
+    if (!animFrameId) return;
+
+    // Capture the current live Y values for morph-out
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    analyser.getByteTimeDomainData(dataArray);
+    const lastLiveY = sampleLiveY(dataArray, dataArray.length);
+
+    cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+
+    const startTime = performance.now();
+
+    function morphBack() {
+        const elapsed = performance.now() - startTime;
+        const blend = Math.min(elapsed / MORPH_MS, 1.0);
+
+        const frontY = lerpArrays(lastLiveY, staticFrontY, blend);
+        const backY = lerpArrays(lastLiveY, staticBackY, blend);
+
+        const frontPath = document.getElementById("sigil-wave-front");
+        const backPath = document.getElementById("sigil-wave-back");
+        if (frontPath) frontPath.setAttribute("d", buildPath(frontY));
+        if (backPath) backPath.setAttribute("d", buildPath(backY));
+
+        if (blend < 1.0) {
+            requestAnimationFrame(morphBack);
+        }
     }
 
-    // Morph back to static shapes
-    const frontPath = document.getElementById("sigil-wave-front");
-    const backPath = document.getElementById("sigil-wave-back");
-    if (frontPath) frontPath.setAttribute("d", SINE_PATH);
-    if (backPath) backPath.setAttribute("d", NOISE_PATH);
+    morphBack();
 }
 
 async function start() {
