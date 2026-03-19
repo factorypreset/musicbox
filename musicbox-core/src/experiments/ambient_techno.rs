@@ -315,10 +315,12 @@ impl DubStab {
     /// Trigger a stab with a root frequency. Creates a minor chord (root, minor 3rd, 5th)
     /// with slight detuning.
     pub fn trigger(&mut self, root_freq: f32, rng: &mut Xorshift64) {
-        let detune = 1.0 + (rng.white() * 0.005);
-        self.freqs[0] = root_freq;
-        self.freqs[1] = root_freq * 1.2 * detune; // minor 3rd
-        self.freqs[2] = root_freq * 1.5 * (1.0 + rng.white() * 0.003); // 5th
+        let detune_root = 1.0 + (rng.white() * 0.008);
+        let detune_3rd = 1.0 + (rng.white() * 0.012);
+        let detune_5th = 1.0 + (rng.white() * 0.010);
+        self.freqs[0] = root_freq * detune_root;
+        self.freqs[1] = root_freq * 1.2 * detune_3rd; // minor 3rd
+        self.freqs[2] = root_freq * 1.5 * detune_5th; // 5th
         self.phases = [0.0; 3];
         self.amp = 0.4;
         self.filter_cutoff = 2500.0;
