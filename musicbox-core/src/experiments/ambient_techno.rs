@@ -1,7 +1,7 @@
 use rand::Rng;
 use rand::SeedableRng;
 
-use crate::dsp::ResonantLpf;
+use crate::dsp::{DattorroReverb, ResonantLpf};
 
 /// A sub-Hz oscillator that emits trigger events each cycle.
 /// Phase accumulates from 0.0 to 1.0; a trigger fires when it wraps.
@@ -170,7 +170,7 @@ impl HiHat {
     }
 
     pub fn trigger(&mut self) {
-        self.amp = 0.6;
+        self.amp = 0.15;
     }
 
     pub fn next_sample(&mut self) -> f32 {
@@ -486,6 +486,7 @@ pub struct AmbientTechno {
     kick: Kick,
     kick_pulse: PulseOscillator,
     hat: HiHat,
+    hat_reverb: DattorroReverb,
     hat_pulse: DriftingPulse,
     hiss: Hiss,
     stab: DubStab,
@@ -523,8 +524,8 @@ impl AmbientTechno {
         // Start at a random phase so the first kick isn't always at sample 0
         let kick_phase = rng.r#gen::<f32>();
 
-        // Hat at ~2x kick frequency, with drift
-        let hat_base_freq = kick_freq * 2.0;
+        // Hat at ~0.5x kick frequency (every other beat), with drift
+        let hat_base_freq = kick_freq * 0.5;
         let drift = 0.5;
         let hat_drift_amount = hat_base_freq * 0.15 * drift;
 
@@ -543,6 +544,7 @@ impl AmbientTechno {
             kick: Kick::new(sr),
             kick_pulse: PulseOscillator::new_with_phase(kick_freq, sr, kick_phase),
             hat: HiHat::new(sr, hat_seed),
+            hat_reverb: DattorroReverb::new(0.92, 0.7, 0.9, 0.02, sr, &mut rng),
             hat_pulse: DriftingPulse::new(hat_base_freq, hat_drift_amount, sr, &mut rng),
             hiss: Hiss::new(sr, &mut rng),
             stab: DubStab::new(sr),
@@ -672,14 +674,15 @@ impl AmbientTechno {
         }
 
         let kick_sample = self.kick.next_sample();
-        let hat_sample = self.hat.next_sample();
+        let hat_dry = self.hat.next_sample();
+        let (hat_l, hat_r) = self.hat_reverb.process(hat_dry);
         let hiss_sample = self.hiss.next_sample();
         let stab_sample = self.stab.next_sample();
         let (grain_l, grain_r) = self.granular.next_sample();
 
-        // Mix: kick center, hat slightly right, stab center, grains spread
-        let mut left = (kick_sample + hat_sample * 0.7 + hiss_sample + stab_sample + grain_l).tanh();
-        let mut right = (kick_sample + hat_sample * 1.0 + hiss_sample + stab_sample + grain_r).tanh();
+        // Mix: kick center, hat through reverb (stereo), stab center, grains spread
+        let mut left = (kick_sample + hat_l + hiss_sample + stab_sample + grain_l).tanh();
+        let mut right = (kick_sample + hat_r + hiss_sample + stab_sample + grain_r).tanh();
 
         // Peak limiter
         let peak = left.abs().max(right.abs());
