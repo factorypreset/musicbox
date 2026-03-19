@@ -1,11 +1,11 @@
-// AudioWorkletProcessor that drives the musicbox WASM engine.
-// Compiles WASM from raw bytes (Safari can't postMessage compiled modules).
-// All WASM calls return single values (no multi-value — Safari compatible).
+// AudioWorkletProcessor that drives WASM engines.
+// Supports multiple engine types: "musicbox" (original) and "ambient-techno" (experiment).
 
 class MusicBoxProcessor extends AudioWorkletProcessor {
     constructor() {
         super();
         this.engine = null;
+        this.engineType = null;
         this.done = false;
 
         this.port.onmessage = (event) => {
@@ -13,19 +13,34 @@ class MusicBoxProcessor extends AudioWorkletProcessor {
 
             if (type === "init") {
                 try {
-                    this._initWasm(data.wasmBytes, data.sampleRate, data.seedHigh, data.seedLow);
+                    this._initWasm(data.wasmBytes, data.sampleRate, data.seedHigh, data.seedLow, data.engineType || "musicbox");
                 } catch (err) {
                     this.port.postMessage({ type: "error", message: err.message || String(err) });
                 }
             } else if (type === "fade-out") {
                 if (this.engine) {
-                    this._wasm.musicboxweb_start_fade_out(this.engine.ptr);
+                    const fn = this.engineType === "ambient-techno"
+                        ? this._wasm.ambienttechnoweb_start_fade_out
+                        : this._wasm.musicboxweb_start_fade_out;
+                    fn(this.engine.ptr);
+                }
+            } else if (type === "set-param") {
+                if (this.engine && this.engineType === "ambient-techno") {
+                    // Allocate param name string in WASM memory
+                    const name = data.name;
+                    const value = data.value;
+                    const encoder = new TextEncoder();
+                    const nameBytes = encoder.encode(name);
+                    const namePtr = this._wasm.__wbindgen_malloc(nameBytes.length, 1);
+                    const mem = new Uint8Array(this._memory.buffer, namePtr, nameBytes.length);
+                    mem.set(nameBytes);
+                    this._wasm.ambienttechnoweb_set_param(this.engine.ptr, namePtr, nameBytes.length, value);
                 }
             }
         };
     }
 
-    _initWasm(wasmBytes, sampleRate, seedHigh, seedLow) {
+    _initWasm(wasmBytes, sampleRate, seedHigh, seedLow, engineType) {
         const wasmModule = new WebAssembly.Module(wasmBytes);
 
         let instance;
@@ -57,11 +72,17 @@ class MusicBoxProcessor extends AudioWorkletProcessor {
 
         this._wasm = exports;
         this._memory = exports.memory;
+        this.engineType = engineType;
 
-        // Combine two 32-bit halves into a BigInt seed
         const seed = (BigInt(seedHigh >>> 0) << 32n) | BigInt(seedLow >>> 0);
-        const ptr = exports.musicboxweb_new(sampleRate, seed);
-        this.engine = { ptr };
+
+        if (engineType === "ambient-techno") {
+            const ptr = exports.ambienttechnoweb_new(sampleRate, seed);
+            this.engine = { ptr };
+        } else {
+            const ptr = exports.musicboxweb_new(sampleRate, seed);
+            this.engine = { ptr };
+        }
 
         this.port.postMessage({ type: "ready" });
     }
@@ -75,17 +96,15 @@ class MusicBoxProcessor extends AudioWorkletProcessor {
         if (!output || output.length === 0) return true;
 
         const frames = output[0].length;
+        const prefix = this.engineType === "ambient-techno" ? "ambienttechnoweb" : "musicboxweb";
 
-        // Render into the engine's internal buffer
-        this._wasm.musicboxweb_render(this.engine.ptr, frames);
+        this._wasm[`${prefix}_render`](this.engine.ptr, frames);
 
-        // Read pointer and length (single-value returns, Safari safe)
-        const dataPtr = this._wasm.musicboxweb_output_ptr(this.engine.ptr) >>> 0;
-        const dataLen = this._wasm.musicboxweb_output_len(this.engine.ptr) >>> 0;
+        const dataPtr = this._wasm[`${prefix}_output_ptr`](this.engine.ptr) >>> 0;
+        const dataLen = this._wasm[`${prefix}_output_len`](this.engine.ptr) >>> 0;
 
         if (!dataPtr || !dataLen) return true;
 
-        // Read interleaved samples directly from WASM memory
         const interleaved = new Float32Array(this._memory.buffer, dataPtr, dataLen);
 
         const left = output[0];
@@ -98,8 +117,7 @@ class MusicBoxProcessor extends AudioWorkletProcessor {
             }
         }
 
-        // Check if engine is done
-        if (this._wasm.musicboxweb_is_done(this.engine.ptr) !== 0) {
+        if (this._wasm[`${prefix}_is_done`](this.engine.ptr) !== 0) {
             this.done = true;
             this.port.postMessage({ type: "done" });
             return false;

@@ -4,9 +4,38 @@ let analyser = null;
 let wasmBytes = null;
 let animFrameId = null;
 let dotAnimFrameId = null;
+let currentEngine = "musicbox";
 
 const btn = document.getElementById("toggle");
 const status = document.getElementById("status");
+const knobsContainer = document.getElementById("knobs");
+
+// ── Experiment selector ──
+document.querySelectorAll(".experiment-selector button").forEach(b => {
+    b.addEventListener("click", () => {
+        if (audioCtx && audioCtx.state !== "closed") return; // don't switch while playing
+        document.querySelectorAll(".experiment-selector button").forEach(x => x.classList.remove("active"));
+        b.classList.add("active");
+        currentEngine = b.dataset.engine;
+        knobsContainer.classList.toggle("visible", currentEngine === "ambient-techno");
+    });
+});
+
+// ── Knob controls ──
+const knobs = ["pulse", "drift", "haze", "density", "grain"];
+knobs.forEach(name => {
+    const slider = document.getElementById(`knob-${name}`);
+    if (slider) {
+        slider.addEventListener("input", () => {
+            if (workletNode && currentEngine === "ambient-techno") {
+                workletNode.port.postMessage({
+                    type: "set-param",
+                    data: { name, value: parseFloat(slider.value) },
+                });
+            }
+        });
+    }
+});
 
 // ── Dot animation along circle arc ──
 const CX = 120, CY = 120, CR = 100;
@@ -269,6 +298,7 @@ async function start() {
                 sampleRate: audioCtx.sampleRate,
                 seedHigh,
                 seedLow,
+                engineType: currentEngine,
             },
         });
 
