@@ -1,7 +1,7 @@
 use rand::Rng;
 use rand::SeedableRng;
 
-use crate::dsp::{DattorroReverb, ResonantLpf};
+use crate::dsp::{BbdDelay, DattorroReverb, ResonantLpf};
 
 /// A sub-Hz oscillator that emits trigger events each cycle.
 /// Phase accumulates from 0.0 to 1.0; a trigger fires when it wraps.
@@ -148,6 +148,7 @@ impl Xorshift64 {
 pub struct HiHat {
     noise: Xorshift64,
     amp: f32,
+    peak_amp: f32,
     decay: f32,
     /// Band-pass state (simple 2-pole)
     bp_low: f32,
@@ -161,6 +162,7 @@ impl HiHat {
         Self {
             noise: Xorshift64::new(seed),
             amp: 0.0,
+            peak_amp: 0.15,
             decay: (-1.0 / (sample_rate * 0.03_f32)).exp(), // ~30ms decay
             bp_low: 0.0,
             bp_band: 0.0,
@@ -169,8 +171,22 @@ impl HiHat {
         }
     }
 
+    /// Rim-shot variant: lower, clickier, shorter decay than a hat.
+    pub fn new_rim(sample_rate: f32, seed: u64) -> Self {
+        Self {
+            noise: Xorshift64::new(seed),
+            amp: 0.0,
+            peak_amp: 0.09,
+            decay: (-1.0 / (sample_rate * 0.015_f32)).exp(), // ~15ms decay
+            bp_low: 0.0,
+            bp_band: 0.0,
+            bp_freq: 3000.0,
+            sample_rate,
+        }
+    }
+
     pub fn trigger(&mut self) {
-        self.amp = 0.15;
+        self.amp = self.peak_amp;
     }
 
     pub fn next_sample(&mut self) -> f32 {
@@ -555,6 +571,8 @@ impl GranularEngine {
 /// ──────────────────────────────────────────────────────────
 /// Kick      1/1      1.200 Hz    -
 /// Hat       7/4      2.100 Hz    4 base cycles  (3.3s)
+/// Hat       1/1      1.200 Hz    -               phase offset 0.5 — lands on the off-beat
+/// Rim       9/5      2.160 Hz    5 base cycles   drifts against kick
 /// Stab      3/5      0.720 Hz    5 base cycles  (4.2s)
 /// Grain     1/7      0.171 Hz    7 base cycles  (5.8s)
 ///
@@ -563,6 +581,12 @@ impl GranularEngine {
 pub struct AmbientTechno {
     kick: Kick,
     kick_pulse: PulseOscillator,
+    hat: HiHat,
+    hat_pulse: PulseOscillator,
+    rim: HiHat,
+    rim_pulse: PulseOscillator,
+    rim_delay: BbdDelay,
+    rim_reverb: DattorroReverb,
     limiter_gain: f32,
     fade_pos: u32,
     fade_state: FadeState,
@@ -584,17 +608,24 @@ const BASE_FREQ: f32 = 1.2;
 
 /// Polyrhythmic ratios (p/q of base frequency).
 /// Chosen so LCM of denominators creates long resolution period.
-const HAT_RATIO: (f32, f32) = (7.0, 4.0);    // 7/4 base
+const RIM_RATIO: (f32, f32) = (9.0, 5.0);    // 9/5 base → 2.160 Hz — drifts against kick
 const STAB_RATIO: (f32, f32) = (3.0, 5.0);   // 3/5 base
 const GRAIN_RATIO: (f32, f32) = (1.0, 7.0);   // 1/7 base
 
 impl AmbientTechno {
-    pub fn new(sample_rate: u32, _seed: u64) -> Self {
+    pub fn new(sample_rate: u32, seed: u64) -> Self {
         let sr = sample_rate as f32;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
         Self {
             kick: Kick::new(sr),
             kick_pulse: PulseOscillator::new(BASE_FREQ, sr),
+            hat: HiHat::new(sr, 0xDEADBEEF),
+            hat_pulse: PulseOscillator::new_with_phase(BASE_FREQ, sr, 0.5),
+            rim: HiHat::new_rim(sr, 0xCAFEBABE),
+            rim_pulse: PulseOscillator::new(BASE_FREQ * RIM_RATIO.0 / RIM_RATIO.1, sr),
+            rim_delay: BbdDelay::new(40.0, 0.65, 0.75, 0.2, 1.0, sr, &mut rng),
+            rim_reverb: DattorroReverb::new(0.92, 0.7, 0.95, 0.05, sr, &mut rng),
             limiter_gain: 1.0,
             fade_pos: 0,
             fade_state: FadeState::FadingIn,
@@ -662,11 +693,22 @@ impl AmbientTechno {
         if self.kick_pulse.tick() {
             self.kick.trigger();
         }
+        if self.hat_pulse.tick() {
+            self.hat.trigger();
+        }
+        if self.rim_pulse.tick() {
+            self.rim.trigger();
+        }
 
-        let sample = self.kick.next_sample();
+        let kick = self.kick.next_sample();
+        let hat = self.hat.next_sample();
+        let rim_dry = self.rim.next_sample();
+        let rim_echoed = self.rim_delay.process(rim_dry);
+        let (rim_l, rim_r) = self.rim_reverb.process(rim_echoed);
 
-        let mut left = sample;
-        let mut right = sample;
+        // Kick centre, hat panned slightly left, rim slightly right
+        let mut left = kick + hat * 0.7 + rim_l * 0.8;
+        let mut right = kick + hat * 0.4 + rim_r * 0.8;
 
         // Peak limiter
         let peak = left.abs().max(right.abs());
