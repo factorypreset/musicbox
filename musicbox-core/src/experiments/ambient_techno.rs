@@ -1037,6 +1037,59 @@ const STAB3_CHORDS: [[f32; 3]; 5] = [
     [ 55.00,  73.42,  87.31], // Dm/A A1 D2 F2
 ];
 
+/// TR-808-style clave: decaying sine at ~2500 Hz, very short (~10 ms).
+/// TR-808-style clave. Default frequency is 2500 Hz; use `trigger_with_note` to tune it.
+struct ClaveVoice {
+    phase: f32,
+    amp: f32,
+    freq: f32,
+    sample_rate: f32,
+}
+
+impl ClaveVoice {
+    fn new(sample_rate: f32) -> Self {
+        Self { phase: 0.0, amp: 0.0, freq: 2500.0, sample_rate }
+    }
+
+    /// Trigger at the default 2500 Hz.
+    fn trigger(&mut self) {
+        self.amp = 1.0;
+        self.phase = 0.0;
+    }
+
+    /// Trigger at a specific musical note, e.g. `"A6"`, `"C#5"`, `"Bb4"`.
+    fn trigger_with_note(&mut self, note: &str) {
+        self.freq = Self::note_to_freq(note);
+        self.amp = 1.0;
+        self.phase = 0.0;
+    }
+
+    /// Convert a note name ("A6", "C#5", "Bb4") to Hz via equal temperament (A4 = 440 Hz).
+    fn note_to_freq(note: &str) -> f32 {
+        let bytes = note.as_bytes();
+        let semitone: i32 = match bytes[0] {
+            b'C' => 0, b'D' => 2, b'E' => 4, b'F' => 5,
+            b'G' => 7, b'A' => 9, b'B' => 11, _ => 9,
+        };
+        let (accidental, octave_idx) = match bytes.get(1) {
+            Some(b'#') => (1i32, 2),
+            Some(b'b') => (-1i32, 2),
+            _ => (0i32, 1),
+        };
+        let octave = (bytes[octave_idx] - b'0') as i32;
+        let midi = (octave + 1) * 12 + semitone + accidental;
+        440.0 * 2.0_f32.powf((midi - 69) as f32 / 12.0)
+    }
+
+    fn next_sample(&mut self) -> f32 {
+        let out = (self.phase * std::f32::consts::TAU).sin() * self.amp;
+        self.phase += self.freq / self.sample_rate;
+        if self.phase >= 1.0 { self.phase -= 1.0; }
+        self.amp *= 0.993; // decays to ~5 % in 10 ms at 44100 Hz
+        out
+    }
+}
+
 // Pattern indices
 const PATTERN_KICK:  usize = 0;
 const PATTERN_SNARE: usize = 1;
@@ -1047,7 +1100,8 @@ const PATTERN_STAB2: usize = 5;
 const PATTERN_STAB3: usize = 6;
 const PATTERN_PAD:   usize = 7;
 const PATTERN_MONO:  usize = 8;
-const NUM_PATTERNS:  usize = 9;
+const PATTERN_CLAVE: usize = 9;
+const NUM_PATTERNS:  usize = 10;
 
 /// One instrument group. Config fields are set once; runtime fields track playback state.
 #[derive(Clone, Copy)]
@@ -1156,6 +1210,10 @@ pub struct AmbientTechno {
     mono_seq_repeats: u8,       // how many full playthroughs of the current sequence
     mono_downbeat_timer: Option<u32>,
     mono_rng: Xorshift64,
+    clave: ClaveVoice,
+    clave_delay: DubDelay,
+    clave_reverb: DattorroReverb,
+    clave_timer: Option<u32>,
     patterns: [Pattern; NUM_PATTERNS],
     pattern_rng: Xorshift64,
     sample_rate: f32,
@@ -1254,6 +1312,10 @@ impl AmbientTechno {
             mono_seq_repeats: 0,
             mono_downbeat_timer: None,
             mono_rng: Xorshift64::new(rng.r#gen::<u64>() | 1),
+            clave: ClaveVoice::new(sr),
+            clave_delay: DubDelay::new(416.0, 0.45, 0.3, sr),
+            clave_reverb: DattorroReverb::new(0.93, 0.7, 0.85, 0.04, sr, &mut rng),
+            clave_timer: None,
             // Placeholder weights — caller will configure via set_pattern() before first use.
             patterns: [
                 Pattern::new(0.2, 0.6, 4, false), // PATTERN_KICK
@@ -1265,6 +1327,7 @@ impl AmbientTechno {
                 Pattern::new(0.7, 0.3, 16, true), // PATTERN_STAB3
                 Pattern::new(0.2, 0.4, 8, true),  // PATTERN_PAD
                 Pattern::new(0.1, 0.3, 8, true),  // PATTERN_MONO
+                Pattern::new(1.0, 0.3, 2, false),  // PATTERN_CLAVE
             ],
             pattern_rng: Xorshift64::new(rng.r#gen::<u64>() | 1),
             sample_rate: sr,
@@ -1473,6 +1536,14 @@ impl AmbientTechno {
                 let beat = (self.sample_rate / BASE_FREQ) as u32;
                 self.stab2_timer = Some(beat - sixteenth + sw);
             }
+            // Clave: one hit per 4-bar loop, 1/16th before the 3rd beat of the 4th bar.
+            // beat_count % 16 == 14 is the 2nd beat of bar 4 (after increment); fire timer at
+            // beat - sixteenth + sw so it lands exactly one 16th note early.
+            if self.beat_count % 16 == 14 && self.patterns[PATTERN_CLAVE].active {
+                let sixteenth = (self.sample_rate / (BASE_FREQ * 4.0)) as u32;
+                let beat = (self.sample_rate / BASE_FREQ) as u32;
+                self.clave_timer = Some(beat - sixteenth + sw);
+            }
         }
 
         tick_timer!(self.kick_timer, {
@@ -1504,6 +1575,10 @@ impl AmbientTechno {
 
         tick_timer!(self.stab2_timer, {
             self.stab2.trigger_with_chord(STAB2_CHORDS[self.last_stab_idx], &mut self.stab_rng);
+        });
+
+        tick_timer!(self.clave_timer, {
+            self.clave.trigger_with_note("A6");
         });
 
         tick_timer!(self.snare_timer, {
@@ -1599,10 +1674,13 @@ impl AmbientTechno {
         let (mono_rev_l, mono_rev_r) = self.mono_reverb.process(mono_dry);
         let mono_l = mono_dry + mono_rev_l * 0.25;
         let mono_r = mono_dry + mono_rev_r * 0.25;
+        let clave_dry = self.clave.next_sample();
+        let (clave_dl, clave_dr) = self.clave_delay.process(clave_dry);
+        let (clave_l, clave_r) = self.clave_reverb.process((clave_dl + clave_dr) * 0.5);
 
         // Kick centre, snare centre, hat panned slightly left, closed hat centre, rim slightly right, stabs, pad and mono centre
-        let mut left = kick + snare_l * 0.425 + ghost_snare_l * 0.3 + rev_rev_l * 0.25 + hat * 0.7 + closed_hat + rim_l * 0.8 + stab_l * 0.6 + stab2_l * 0.6 + stab3_l * 0.7 + pad_l + mono_l * 0.09375;
-        let mut right = kick + snare_r * 0.425 + ghost_snare_r * 0.3 + rev_rev_r * 0.25 + hat * 0.4 + closed_hat + rim_r * 0.8 + stab_r * 0.6 + stab2_r * 0.6 + stab3_r * 0.7 + pad_r + mono_r * 0.09375;
+        let mut left = kick + snare_l * 0.425 + ghost_snare_l * 0.3 + rev_rev_l * 0.25 + hat * 0.7 + closed_hat + rim_l * 0.8 + stab_l * 0.6 + stab2_l * 0.6 + stab3_l * 0.7 + pad_l + mono_l * 0.09375 + clave_l * 0.5;
+        let mut right = kick + snare_r * 0.425 + ghost_snare_r * 0.3 + rev_rev_r * 0.25 + hat * 0.4 + closed_hat + rim_r * 0.8 + stab_r * 0.6 + stab2_r * 0.6 + stab3_r * 0.7 + pad_r + mono_r * 0.09375 + clave_r * 0.5;
 
         // Peak limiter
         let peak = left.abs().max(right.abs());
