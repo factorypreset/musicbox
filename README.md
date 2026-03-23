@@ -11,6 +11,12 @@ through BBD delay, and a Dattorro plate reverb.
 cargo run --release
 ```
 
+Or for the generative techno style:
+
+```
+cargo run --release -- techno
+```
+
 Ctrl+C to fade out and stop.
 
 ## Render to file
