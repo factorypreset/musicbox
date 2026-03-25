@@ -232,31 +232,29 @@ impl Snare808 {
         }
     }
 
-    pub fn trigger(&mut self) {
+    fn reset_phases(&mut self) {
         self.tone1_phase = 0.0;
         self.tone2_phase = 0.0;
         self.tone1_pitch = 200.0; // sweeps 200 → 80 Hz
         self.tone2_pitch = 175.0; // sweeps 175 → 70 Hz (detuned pair)
-        self.tone_amp = 0.15;
-        self.noise_amp = 0.50;
         self.noise_bp_low = 0.0;
         self.noise_bp_band = 0.0;
-        self.crack_amp = 0.3;
         self.active = true;
+    }
+
+    pub fn trigger(&mut self) {
+        self.reset_phases();
+        self.tone_amp = 0.15;
+        self.noise_amp = 0.50;
+        self.crack_amp = 0.3;
     }
 
     /// Ghost hit: half the amplitude of a full trigger.
     pub fn trigger_ghost(&mut self) {
-        self.tone1_phase = 0.0;
-        self.tone2_phase = 0.0;
-        self.tone1_pitch = 200.0;
-        self.tone2_pitch = 175.0;
+        self.reset_phases();
         self.tone_amp = 0.12;
         self.noise_amp = 0.25;
-        self.noise_bp_low = 0.0;
-        self.noise_bp_band = 0.0;
         self.crack_amp = 0.15;
-        self.active = true;
     }
 
     pub fn next_sample(&mut self) -> f32 {
@@ -505,7 +503,7 @@ impl DubStab {
         }
 
         // Sum detuned saw/triangle oscillators
-        let mut sig = 0.0f32;
+        let mut sig = 0.0;
         for i in 0..3 {
             let s = Self::saw(self.phases[i]);
             let t = Self::triangle(self.phases[i]);
@@ -758,7 +756,7 @@ const GRAIN_FREQS_HIGH: [f32; 6] = [1800.0, 2400.0, 3200.0, 4200.0, 5600.0, 7000
 const GRAIN_FREQS_LOW: [f32; 4] = [40.0, 55.0, 65.0, 80.0];
 
 impl GranularEngine {
-    pub fn new(sample_rate: f32, seed: u64, rng: &mut impl rand::Rng) -> Self {
+    pub fn new(sample_rate: f32, seed: u64, rng: &mut impl Rng) -> Self {
         let grains = (0..6).map(|_| Grain::new()).collect();
         Self {
             grains,
@@ -878,28 +876,15 @@ impl MonoSynth {
     /// Bass variant: lower cutoff, lower resonance, longer decay — thick and rounded.
     pub fn new_bass(sample_rate: f32) -> Self {
         Self {
-            phase: 0.0,
-            sub_phase: 0.0,
-            freq: 110.0,
-            target_freq: 110.0,
-            amp: 0.0,
-            amp_peak: 0.6,
             amp_attack_rate: 0.6 / (sample_rate * 0.025_f32), // ~25ms attack
             amp_decay: (-1.0 / (sample_rate * 0.12_f32)).exp(), // ~120ms note decay
-            attacking: false,
-            lp1_low: 0.0,
-            lp1_band: 0.0,
-            lp2_low: 0.0,
-            lp2_band: 0.0,
-            filter_env: 0.0,
             filter_env_decay: (-1.0 / (sample_rate * 0.08_f32)).exp(), // ~80ms filter sweep
-            sweep_phase: 0.0,
             cutoff_min: 120.0,
             cutoff_sweep_range: 120.0, // 120–240 Hz
             cutoff_peak: 300.0,
             resonance: 0.25,
             portamento: 0.001,
-            sample_rate,
+            ..Self::new(sample_rate)
         }
     }
 
@@ -1423,6 +1408,10 @@ impl AmbientTechno {
         }
     }
 
+    fn fade_ramp(&self) -> f32 {
+        self.fade_pos as f32 / self.fade_samples as f32
+    }
+
     pub fn start_fade_out(&mut self) {
         if self.fade_state == FadeState::FadingIn || self.fade_state == FadeState::Playing {
             self.fade_state = FadeState::FadingOut;
@@ -1459,7 +1448,7 @@ impl AmbientTechno {
                 if self.fade_pos >= self.fade_samples {
                     self.fade_state = FadeState::Playing;
                 }
-                let t = self.fade_pos as f32 / self.fade_samples as f32;
+                let t = self.fade_ramp();
                 t * t
             }
             FadeState::Playing => 1.0,
@@ -1469,7 +1458,7 @@ impl AmbientTechno {
                     0.0
                 } else {
                     self.fade_pos = self.fade_pos.saturating_sub(1);
-                    let t = self.fade_pos as f32 / self.fade_samples as f32;
+                    let t = self.fade_ramp();
                     t * t
                 }
             }
