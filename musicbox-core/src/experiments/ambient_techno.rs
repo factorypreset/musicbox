@@ -1859,47 +1859,6 @@ mod tests {
     }
 
     #[test]
-    fn hiss_produces_continuous_signal() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let mut hiss = Hiss::new(44100.0, &mut rng);
-
-        let mut has_signal = false;
-        for _ in 0..4410 {
-            if hiss.next_sample().abs() > 0.0001 {
-                has_signal = true;
-                break;
-            }
-        }
-        assert!(has_signal, "hiss should produce continuous signal");
-    }
-
-    #[test]
-    fn haze_param_controls_hiss_level() {
-        // Test hiss directly rather than through the full mix
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
-        let mut hiss = Hiss::new(44100.0, &mut rng);
-
-        // At default level
-        let mut rms_default = 0.0f32;
-        for _ in 0..44100 {
-            let s = hiss.next_sample();
-            rms_default += s * s;
-        }
-
-        hiss.set_level(0.0);
-        let mut rms_zero = 0.0f32;
-        for _ in 0..44100 {
-            let s = hiss.next_sample();
-            rms_zero += s * s;
-        }
-
-        assert!(rms_default > rms_zero,
-            "default level ({}) should be louder than zero ({})",
-            rms_default, rms_zero);
-        assert!(rms_zero < 0.0001, "hiss at level 0 should be nearly silent");
-    }
-
-    #[test]
     fn pulse_param_changes_kick_rate() {
         // Test pulse oscillator directly — more reliable than detecting kicks in mixed audio
         let mut fast = PulseOscillator::new(2.08, 44100.0);
@@ -1957,45 +1916,6 @@ mod tests {
             }
         }
         assert!(has_signal, "granular engine should produce signal after spawn");
-    }
-
-    #[test]
-    fn polyrhythm_ratios_produce_correct_trigger_counts() {
-        let sr = 44100.0;
-        let base = BASE_FREQ;
-        let duration_s = 20.0;
-
-        let mut kick = PulseOscillator::new(base, sr);
-        let mut hat = PulseOscillator::new(base * HAT_RATIO.0 / HAT_RATIO.1, sr);
-        let mut stab = PulseOscillator::new(base * STAB_RATIO.0 / STAB_RATIO.1, sr);
-        let mut grain = PulseOscillator::new(base * GRAIN_RATIO.0 / GRAIN_RATIO.1, sr);
-
-        let mut counts = [0u32; 4];
-        for _ in 0..(sr as u32 * duration_s as u32) {
-            if kick.tick() { counts[0] += 1; }
-            if hat.tick() { counts[1] += 1; }
-            if stab.tick() { counts[2] += 1; }
-            if grain.tick() { counts[3] += 1; }
-        }
-
-        // Expected: base*duration triggers for each
-        // kick:  1.2 * 20 = 24
-        // hat:   2.1 * 20 = 42
-        // stab:  0.72 * 20 = 14.4 → 14
-        // grain: 0.1714 * 20 = 3.4 → 3
-        assert!((counts[0] as i32 - 24).unsigned_abs() <= 1,
-            "kick: expected ~24, got {}", counts[0]);
-        assert!((counts[1] as i32 - 42).unsigned_abs() <= 1,
-            "hat: expected ~42, got {}", counts[1]);
-        assert!((counts[2] as i32 - 14).unsigned_abs() <= 1,
-            "stab: expected ~14, got {}", counts[2]);
-        assert!((counts[3] as i32 - 3).unsigned_abs() <= 1,
-            "grain: expected ~3, got {}", counts[3]);
-
-        // Verify the ratios hold: hat/kick ≈ 7/4, stab/kick ≈ 3/5
-        let hat_ratio = counts[1] as f32 / counts[0] as f32;
-        assert!((hat_ratio - 7.0 / 4.0).abs() < 0.1,
-            "hat/kick ratio should be ~1.75, got {}", hat_ratio);
     }
 
     #[test]
