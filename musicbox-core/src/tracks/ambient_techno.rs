@@ -177,10 +177,10 @@ pub struct AmbientTechno {
     closed_hat: HiHat,
     closed_hat_lpf: ResonantLpf,
     hat_phaser: Phaser,
-    sub_beat: u8,
-    sub_32: u8,
+    open_hat_timer: Option<u32>,
+    closed_hat_timers: [Option<u32>; 3],
     roll_active: bool,
-    roll_swing_timer: Option<u32>,
+    roll_timers: [Option<u32>; 8],
     snare: Snare808,
     snare_timer: Option<u32>,
     snare_reverb: DattorroReverb,
@@ -259,10 +259,10 @@ impl AmbientTechno {
             closed_hat: HiHat::new_closed(sr, 0xFEEDFACE),
             closed_hat_lpf: ResonantLpf::new(3000.0, 6000.0, 0.2, 0.1, sr, &mut rng),
             hat_phaser: Phaser::new(0.7, 0.3, 0.25, sr),
-            sub_beat: 0,
-            sub_32: 0,
+            open_hat_timer: None,
+            closed_hat_timers: [None; 3],
             roll_active: false,
-            roll_swing_timer: None,
+            roll_timers: [None; 8],
             snare: Snare808::new(sr, rng.r#gen::<u64>() | 1),
             snare_timer: None,
             snare_reverb: DattorroReverb::new(0.5, 0.3, 0.75, 0.04, sr, &mut rng),
@@ -467,10 +467,12 @@ impl AmbientTechno {
         let ticks = self.clock.tick();
 
         if ticks.quarter {
-            self.sub_beat = 0;
-            self.sub_32 = 0;
-            self.roll_swing_timer = None;
             let sw = swing_offset(beat_duration);
+            let sixteenth = beat_duration / 4;
+            self.open_hat_timer = Some(beat_duration / 2 + sw);
+            self.closed_hat_timers[0] = Some(sixteenth + sw);
+            self.closed_hat_timers[1] = Some(sixteenth * 2);
+            self.closed_hat_timers[2] = Some(sixteenth * 3 + sw);
 
             // Every 8 bars (32 beats): re-evaluate which patterns are active.
             if self.beat_count % 32 == 0 {
@@ -487,6 +489,12 @@ impl AmbientTechno {
                 self.bassline_downbeat_timer = Some(sw);
             }
             self.roll_active = self.patterns[PATTERN_HATS].active && self.beat_count % 8 == 7;
+            if self.roll_active {
+                let spacing = beat_duration / 8;
+                for i in 0..8usize {
+                    self.roll_timers[i] = Some(spacing * i as u32 + if i % 2 == 1 { sw } else { 0 });
+                }
+            }
             if self.beat_count % 8 == 0 && self.patterns[PATTERN_PAD].active {
                 // Every 8 beats: pick a new high pentatonic note for the pad
                 let idx = (self.pad_rng.next() as usize) % PAD_FREQS.len();
@@ -531,13 +539,6 @@ impl AmbientTechno {
                 let beat = (self.sample_rate / BASE_FREQ) as u32;
                 self.clave_timer = Some(beat - sixteenth + sw);
             }
-        }
-
-        if ticks.swung_sixteenth && !ticks.quarter {
-            self.sub_beat += 1;
-        }
-        if ticks.thirty_second && !ticks.quarter {
-            self.sub_32 += 1;
         }
 
         tick_timer!(self.kick_timer, {
@@ -597,50 +598,66 @@ impl AmbientTechno {
             self.ghost_snare.trigger_ghost();
         });
 
-        tick_timer!(self.roll_swing_timer, {
-            self.closed_hat.trigger();
+        // Open hat fires at beat_duration/2 + sw (7/12 of beat, swung off-beat 8th).
+        tick_timer!(self.open_hat_timer, {
+            if self.patterns[PATTERN_HATS].active { self.hat.trigger(); }
         });
 
-        // Open hat fires at the swung off-beat 8th note position.
-        if self.patterns[PATTERN_HATS].active && ticks.swung_eighth && !ticks.quarter {
-            self.hat.trigger();
-        }
-
-        // Closed hats fire at swung 16th note positions (1st, 3rd) and straight 8th (2nd).
-        let at_closed_hat_pos = ticks.swung_sixteenth && !ticks.quarter;
-
-        // Closed hats are phase-locked to the kick: fire at swung 16th note positions.
-        if self.patterns[PATTERN_HATS].active && at_closed_hat_pos {
-            self.closed_hat.trigger();
-        }
-
-        // Monosynth off-beat 16th notes share the same swung positions as the closed hats.
-        if self.patterns[PATTERN_MONO].active && at_closed_hat_pos {
-            self.mono.trigger(self.mono_seq_freqs[self.mono_step], self.mono_step % 3 == 0);
-            self.advance_mono_step();
-        }
-
-        // Bassline off-beat 16ths: steps 1, 2, 3 within each beat.
-        if self.patterns[PATTERN_BASSLINE].active && at_closed_hat_pos {
-            let base = ((self.beat_count.wrapping_sub(1)) % 8 * 4) as usize;
-            if let Some(freq) = BASSLINE_PATTERN[base + self.sub_beat as usize] {
-                self.bass.trigger(freq, false);
+        // Closed hat position 1: swung 1st 16th (sixteenth + sw).
+        tick_timer!(self.closed_hat_timers[0], {
+            if self.patterns[PATTERN_HATS].active { self.closed_hat.trigger(); }
+            if self.patterns[PATTERN_MONO].active {
+                self.mono.trigger(self.mono_seq_freqs[self.mono_step], self.mono_step % 3 == 0);
+                self.advance_mono_step();
             }
-        }
+            if self.patterns[PATTERN_BASSLINE].active {
+                let base = ((self.beat_count.wrapping_sub(1)) % 8 * 4) as usize;
+                if let Some(freq) = BASSLINE_PATTERN[base + 1] { self.bass.trigger(freq, false); }
+            }
+        });
 
-        // On the last beat of every 2-measure cycle, fire a roll of 8 evenly spaced closed hats.
-        // Even-indexed hits (on-beat 32nd notes) fire immediately; odd-indexed (off-beat) are
-        // swung by scheduling a short timer.
-        if self.roll_active {
-            if ticks.quarter {
-                self.closed_hat.trigger(); // hit 0: on the downbeat
-            } else if ticks.thirty_second {
-                let sw = swing_offset(beat_duration);
-                if self.sub_32 % 2 == 0 {
-                    self.closed_hat.trigger(); // even hits: straight 32nd
-                } else {
-                    self.roll_swing_timer = Some(sw); // odd hits: swung 32nd
+        // Closed hat position 2: straight 8th (sixteenth * 2).
+        tick_timer!(self.closed_hat_timers[1], {
+            if self.patterns[PATTERN_HATS].active { self.closed_hat.trigger(); }
+            if self.patterns[PATTERN_MONO].active {
+                self.mono.trigger(self.mono_seq_freqs[self.mono_step], self.mono_step % 3 == 0);
+                self.advance_mono_step();
+            }
+            if self.patterns[PATTERN_BASSLINE].active {
+                let base = ((self.beat_count.wrapping_sub(1)) % 8 * 4) as usize;
+                if let Some(freq) = BASSLINE_PATTERN[base + 2] { self.bass.trigger(freq, false); }
+            }
+        });
+
+        // Closed hat position 3: swung 3rd 16th (sixteenth * 3 + sw).
+        tick_timer!(self.closed_hat_timers[2], {
+            if self.patterns[PATTERN_HATS].active { self.closed_hat.trigger(); }
+            if self.patterns[PATTERN_MONO].active {
+                self.mono.trigger(self.mono_seq_freqs[self.mono_step], self.mono_step % 3 == 0);
+                self.advance_mono_step();
+            }
+            if self.patterns[PATTERN_BASSLINE].active {
+                let base = ((self.beat_count.wrapping_sub(1)) % 8 * 4) as usize;
+                if let Some(freq) = BASSLINE_PATTERN[base + 3] { self.bass.trigger(freq, false); }
+            }
+        });
+
+        // Roll: 8 evenly-spaced closed hats on the last beat of every 2-bar cycle.
+        // Odd-indexed hits are pre-swung by sw samples in their scheduled timer values.
+        {
+            let mut fire_count = 0u8;
+            for t in &mut self.roll_timers {
+                if let Some(v) = t {
+                    if *v == 0 {
+                        *t = None;
+                        fire_count += 1;
+                    } else {
+                        *v -= 1;
+                    }
                 }
+            }
+            for _ in 0..fire_count {
+                self.closed_hat.trigger();
             }
         }
         if self.patterns[PATTERN_RIM].active && self.rim_pulse.tick() {
