@@ -287,6 +287,31 @@
     footer { flex-direction: column; gap: 8px; }
   }
 
+  /* ── GROOVEBOX ── */
+
+  .groovebox-container {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    margin-top: 8px;
+  }
+
+  .groovebox-container.visible {
+    display: flex;
+  }
+
+  #groovebox svg {
+    overflow: visible;
+  }
+
+  .orbit-ring {
+    transition: stroke 0.2s;
+  }
+
+  .sigil-voice {
+    transition: opacity 0.2s;
+  }
+
   @keyframes fadeUp {
     from { opacity: 0; transform: translateY(12px); }
     to { opacity: 1; transform: translateY(0); }
@@ -347,6 +372,9 @@
       <input type="range" class="knob-slider" id="knob-haze" min="0" max="1" step="0.01" value="0.5">
     </div>
   </div>
+  <div class="groovebox-container" id="groovebox-container">
+    <div id="groovebox"></div>
+  </div>
   <p id="status"></p>
   <a href="https://genlevel.com" class="genlevel-link">genlevel</a>
 </div>
@@ -370,6 +398,7 @@
   <div class="lbl">&copy; Benjamin Askins 2026</div>
 </footer>
 
+<script src="groovebox.js"></script>
 <script src="main.js"></script>
 
 <script>

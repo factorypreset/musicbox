@@ -9,6 +9,7 @@ let currentEngine = "musicbox";
 const btn = document.getElementById("toggle");
 const status = document.getElementById("status");
 const knobsContainer = document.getElementById("knobs");
+const grooveboxContainer = document.getElementById("groovebox-container");
 
 // ── Experiment selector ──
 document.querySelectorAll(".experiment-selector button").forEach(b => {
@@ -18,6 +19,12 @@ document.querySelectorAll(".experiment-selector button").forEach(b => {
         b.classList.add("active");
         currentEngine = b.dataset.engine;
         knobsContainer.classList.toggle("visible", currentEngine === "ambient-techno");
+        const isTechno = currentEngine === "ambient-techno";
+        grooveboxContainer.classList.toggle("visible", isTechno);
+        if (isTechno && !grooveboxContainer.dataset.initialized) {
+            window.groovebox.init();
+            grooveboxContainer.dataset.initialized = "true";
+        }
     });
 });
 
@@ -36,6 +43,17 @@ knobs.forEach(name => {
         });
     }
 });
+
+// ── Groovebox voice activation ──
+window.grooveboxOnVoice = function(voiceId, active) {
+    if (!workletNode || currentEngine !== "ambient-techno") return;
+    const voice = window.groovebox.VOICES.find(v => v.id === voiceId);
+    if (!voice) return;
+    workletNode.port.postMessage({
+        type: "set-param",
+        data: { name: voice.param, value: active ? 0.0 : 1.0 },
+    });
+};
 
 // ── Dot animation along circle arc ──
 const CX = 120, CY = 120, CR = 100;
@@ -304,6 +322,19 @@ async function start() {
 
         await ready;
 
+        // For techno engine: send initial mute states and start orbit animation
+        if (currentEngine === "ambient-techno") {
+            const placements = window.groovebox.getPlacements();
+            window.groovebox.VOICES.forEach(voice => {
+                const active = !!placements[voice.id];
+                workletNode.port.postMessage({
+                    type: "set-param",
+                    data: { name: voice.param, value: active ? 0.0 : 1.0 },
+                });
+            });
+            window.groovebox.startAnimation();
+        }
+
         // Start the sigil visualization
         startVisualization();
 
@@ -337,6 +368,7 @@ function stop() {
 
 function cleanup() {
     stopVisualization();
+    window.groovebox.stopAnimation();
     if (workletNode) {
         workletNode.disconnect();
         workletNode = null;
