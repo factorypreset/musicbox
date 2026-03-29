@@ -311,7 +311,7 @@ impl AmbientTechno {
             rev_rev_reverb: DattorroReverb::new(0.92, 0.7, 0.85, 0.03, sr, &mut rng),
             rim: HiHat::new_rim(sr, 0xCAFEBABE),
             rim_pulse: PulseOscillator::new(BASE_FREQ * RIM_RATIO.0 / RIM_RATIO.1, sr),
-            rim_delay: BbdDelay::new(40.0, 0.65, 0.75, 0.2, 1.0, sr, &mut rng),
+            rim_delay: BbdDelay::new(180.0, 0.70, 0.80, 0.2, 1.0, sr, &mut rng),
             rim_reverb: DattorroReverb::new(0.92, 0.7, 0.95, 0.05, sr, &mut rng),
             stab: DubStab::new(sr),
             stab_lpf: ResonantLpf::new(300.0, 2500.0, 0.3, 0.5, sr, &mut rng), // 2s LFO
@@ -957,8 +957,8 @@ impl AmbientTechno {
         let snare_r = (snare_dry + snare_rev_r * (0.3 + snare_haze * 0.7)) * snare_fade;
         let hat_out_l = hat_l * hats_fade;
         let hat_out_r = hat_r * hats_fade;
-        let rim_l = (rim_dry + rim_rev_l * (0.8 + rim_haze * 0.5)) * rim_fade * rim_echo;
-        let rim_r = (rim_dry + rim_rev_r * (0.8 + rim_haze * 0.5)) * rim_fade * rim_echo;
+        let rim_l = rim_rev_l * (0.8 + rim_haze * 0.5) * rim_fade * rim_echo;
+        let rim_r = rim_rev_r * (0.8 + rim_haze * 0.5) * rim_fade * rim_echo;
         let stab_l = stab_eff_l * stab1_fade * stab1_echo;
         let stab_r = stab_eff_r * stab1_fade * stab1_echo;
         let stab2_l = stab2_dl * stab2_fade * stab2_echo;
