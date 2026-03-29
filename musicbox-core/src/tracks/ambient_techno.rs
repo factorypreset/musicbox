@@ -2,7 +2,7 @@ use rand::Rng;
 use rand::SeedableRng;
 
 use crate::effects::{BbdDelay, DattorroReverb, DubDelay, Phaser, ResonantLpf};
-use crate::instruments::{Cabasa, ClaveVoice, DubStab, HiHat, Kick, Maracas, MonoSynth, Snare808, SynthPad};
+use crate::instruments::{Cabasa, Clap, ClaveVoice, DubStab, HiHat, Kick, Maracas, MonoSynth, Snare808, SynthPad};
 use crate::clocks::{Clock, PulseOscillator, TimeSignature};
 use crate::util::prng::Xorshift64;
 use crate::track::{State, Track};
@@ -107,7 +107,8 @@ const PATTERN_MONO:  usize = 8;
 const PATTERN_CLAVE:    usize = 9;
 const PATTERN_BASSLINE: usize = 10;
 const PATTERN_SHAKERS:  usize = 11;
-const NUM_PATTERNS:     usize = 12;
+const PATTERN_CLAP:     usize = 12;
+const NUM_PATTERNS:     usize = 13;
 
 // 32nd-note positions (0–31) within a bar that are valid for extra soft shakers.
 // Excluded: beats (0, 8, 16, 24) and roll positions (0–7).
@@ -116,6 +117,9 @@ const EXTRA_SHAKER_POSITIONS: [u32; 21] = [
     17, 18, 19, 20, 21, 22, 23,
     25, 26, 27, 28, 29, 30, 31,
 ];
+
+// Valid 32nd-note positions for ghost clap hits (off the 1/2/3/4 and away from accented hits).
+const GHOST_CLAP_POSITIONS: [u32; 8] = [2, 6, 12, 14, 18, 22, 26, 28];
 
 /// One instrument group. Config fields are set once; runtime fields track playback state.
 #[derive(Clone, Copy)]
@@ -223,6 +227,9 @@ pub struct AmbientTechno {
     extra_shaker_gains: [f32; 4],
     cabasa: Cabasa,
     cabasa_timer: Option<u32>,
+    clap: Clap,
+    clap_timer: Option<u32>,
+    ghost_clap_timer: Option<u32>,
     snare: Snare808,
     snare_timer: Option<u32>,
     snare_reverb: DattorroReverb,
@@ -318,6 +325,9 @@ impl AmbientTechno {
             extra_shaker_gains: [0.0; 4],
             cabasa: Cabasa::new(sr, rng.r#gen::<u64>() | 1),
             cabasa_timer: None,
+            clap: Clap::new(sr, 35.0, rng.r#gen::<u64>() | 1),
+            clap_timer: None,
+            ghost_clap_timer: None,
             snare: Snare808::new(sr, rng.r#gen::<u64>() | 1),
             snare_timer: None,
             snare_reverb: DattorroReverb::new(0.5, 0.3, 0.75, 0.04, sr, &mut rng),
@@ -387,6 +397,7 @@ impl AmbientTechno {
                 Pattern::new(0.1, 0.3, 2, false),   // PATTERN_CLAVE
                 Pattern::new(0.1, 0.4, 4, true),    // PATTERN_BASSLINE
                 Pattern::new(0.2, 0.3, 4, true),   // PATTERN_SHAKERS
+                Pattern::new(0.1, 0.3, 4, false),  // PATTERN_CLAP
             ],
             pattern_rng: Xorshift64::new(rng.r#gen::<u64>() | 1),
             user_active: [false; NUM_PATTERNS],
@@ -538,6 +549,7 @@ impl AmbientTechno {
             "clave_mute" => Some(PATTERN_CLAVE),
             "bass_mute" => Some(PATTERN_BASSLINE),
             "shakers_mute" => Some(PATTERN_SHAKERS),
+            "clap_mute" => Some(PATTERN_CLAP),
             _ => None,
         };
         if let Some(i) = mute_idx {
@@ -560,6 +572,7 @@ impl AmbientTechno {
             "clave_ratio" => Some(PATTERN_CLAVE),
             "bass_ratio" => Some(PATTERN_BASSLINE),
             "shakers_ratio" => Some(PATTERN_SHAKERS),
+            "clap_ratio" => Some(PATTERN_CLAP),
             _ => None,
         };
         if let Some(i) = ratio_idx {
@@ -567,6 +580,11 @@ impl AmbientTechno {
             let freq = BASE_FREQ * RATIOS[ri].0 / RATIOS[ri].1;
             self.voice_pulses[i].set_freq(freq);
             self.voice_pond[i] = ri;
+            return;
+        }
+
+        if name == "clap_decay" {
+            self.clap.set_decay_ms(value.max(1.0));
             return;
         }
 
@@ -696,6 +714,9 @@ impl AmbientTechno {
                         self.maracas.trigger();
                         self.cabasa.trigger();
                     }
+                    PATTERN_CLAP => {
+                        self.clap.trigger(1.0);
+                    }
                     PATTERN_BASSLINE => {
                         let dm = drift_mul(PATTERN_BASSLINE, self);
                         let step = (self.beat_count % 8 * 4) as usize;
@@ -748,7 +769,7 @@ impl AmbientTechno {
                 for i in 0..n {
                     let pos = EXTRA_SHAKER_POSITIONS[self.pattern_rng.next() as usize % EXTRA_SHAKER_POSITIONS.len()];
                     self.extra_shaker_timers[i] = Some(pos * thirty_second);
-                    self.extra_shaker_gains[i] = 0.30 + self.pattern_rng.white() * 0.05;
+                    self.extra_shaker_gains[i] = 0.25 + self.pattern_rng.white() * 0.05;
                 }
             }
             // Maracas roll: every 8 bars (32 beats), at the downbeat
@@ -782,6 +803,20 @@ impl AmbientTechno {
             self.beat_count += 1;
             if self.beat_count % 2 == 0 && self.is_active(PATTERN_SHAKERS) {
                 self.cabasa_timer = Some(sw);
+            }
+            // Clap: accented on beats 2 and 4
+            if self.beat_count % 2 == 0 && self.is_active(PATTERN_CLAP) {
+                self.clap_timer = Some(sw);
+            }
+            // Ghost clap: 0 or 1 hit per 4 bars at a random valid 32nd position
+            if self.beat_count % 16 == 1 && self.is_active(PATTERN_CLAP) {
+                self.ghost_clap_timer = None;
+                if self.pattern_rng.next() % 2 == 0 {
+                    let bar = (self.pattern_rng.next() % 4) as u32;
+                    let pos = GHOST_CLAP_POSITIONS[self.pattern_rng.next() as usize % GHOST_CLAP_POSITIONS.len()];
+                    let thirty_second = beat_duration / 8;
+                    self.ghost_clap_timer = Some(bar * 4 * beat_duration + pos * thirty_second);
+                }
             }
             if self.beat_count % 2 == 0 && self.is_active(PATTERN_KICK) {
                 let eighth_note = (self.sample_rate / (BASE_FREQ * 2.0)) as u32;
@@ -875,6 +910,12 @@ impl AmbientTechno {
         tick_timer!(self.cabasa_timer, {
             if self.is_active(PATTERN_SHAKERS) { self.cabasa.trigger(); }
         });
+        tick_timer!(self.clap_timer, {
+            if self.is_active(PATTERN_CLAP) { self.clap.trigger(1.0); }
+        });
+        tick_timer!(self.ghost_clap_timer, {
+            if self.is_active(PATTERN_CLAP) { self.clap.trigger(0.3); }
+        });
 
         // Closed hat position 1: swung 1st 16th (sixteenth + sw).
         tick_timer!(self.closed_hat_timers[0], {
@@ -946,7 +987,7 @@ impl AmbientTechno {
                 }
             }
             for _ in 0..fire_count {
-                let gain = 0.30 + self.pattern_rng.white() * 0.05; // 0.25–0.35
+                let gain = 0.25 + self.pattern_rng.white() * 0.05; // 0.25–0.35
                 self.maracas.trigger_soft(gain);
             }
         }
@@ -987,6 +1028,7 @@ impl AmbientTechno {
         let closed_hat = self.closed_hat_lpf.process(self.closed_hat.next_sample());
         let (hat_l, hat_r) = self.hat_phaser.process(hat + closed_hat * 1.7);
         let shakers = self.maracas.next_sample() + self.cabasa.next_sample();
+        let clap_out = self.clap.next_sample();
         let rim_dry = self.rim.next_sample();
         let rim_echoed = self.rim_delay.process(rim_dry);
         let (rim_rev_l, rim_rev_r) = self.rim_reverb.process(rim_echoed);
@@ -1061,8 +1103,9 @@ impl AmbientTechno {
         let bass_l = (bass_dry + bass_rev_l * (0.08 + bass_haze * 0.3)) * bass_fade;
         let bass_r = (bass_dry + bass_rev_r * (0.08 + bass_haze * 0.3)) * bass_fade;
 
-        let mut left = kick_out + snare_l * 0.425 + ghost_snare_l * 0.3 + rev_rev_l * 0.25 + hat_out_l * 0.7 + shakers * 0.5 + rim_l * 0.8 + stab_l * 0.6 + stab2_l * 0.6 + stab3_l * 0.7 + pad_l + mono_l * 0.09375 + clave_l * 0.5 + bass_l * 0.09;
-        let mut right = kick_out + snare_r * 0.425 + ghost_snare_r * 0.3 + rev_rev_r * 0.25 + hat_out_r * 0.7 + shakers * 0.5 + rim_r * 0.8 + stab_r * 0.6 + stab2_r * 0.6 + stab3_r * 0.7 + pad_r + mono_r * 0.09375 + clave_r * 0.5 + bass_r * 0.09;
+        // This is the main mixer for the track
+        let mut left = kick_out + snare_l * 0.425 + ghost_snare_l * 0.3 + rev_rev_l * 0.25 + hat_out_l * 0.7 + shakers * 0.4 + clap_out * 0.2 + rim_l * 0.8 + stab_l * 0.6 + stab2_l * 0.6 + stab3_l * 0.7 + pad_l + mono_l * 0.09375 + clave_l * 0.5 + bass_l * 0.09;
+        let mut right = kick_out + snare_r * 0.425 + ghost_snare_r * 0.3 + rev_rev_r * 0.25 + hat_out_r * 0.7 + shakers * 0.4 + clap_out * 0.2 + rim_r * 0.8 + stab_r * 0.6 + stab2_r * 0.6 + stab3_r * 0.7 + pad_r + mono_r * 0.09375 + clave_r * 0.5 + bass_r * 0.09;
 
         // Peak limiter
         let peak = left.abs().max(right.abs());
