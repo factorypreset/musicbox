@@ -607,14 +607,21 @@ impl AmbientTechno {
 
         // ── User-controlled mode: each voice triggers from its own PulseOscillator ──
         if self.user_controlled {
+            // Drift: pitch wobble multiplier (±0.5 semitone = ±~3%)
+            let drift_mul = |pat: usize, this: &Self| -> f32 {
+                let d = this.pond_mod_lfo(pat, MOD_DRIFT);
+                1.0 + (d - 0.5) * 0.06 // ±3% pitch
+            };
+
             for i in 0..NUM_PATTERNS {
                 if !self.user_active[i] { continue; }
                 if !self.voice_pulses[i].tick() { continue; }
 
                 match i {
                     PATTERN_KICK => {
-                        self.kick.trigger();
-                        self.ghost_kick.trigger_with_amp_and_pitch(0.125, 1.0);
+                        let dm = drift_mul(PATTERN_KICK, self);
+                        self.kick.trigger_with_amp_and_pitch(1.0, dm);
+                        self.ghost_kick.trigger_with_amp_and_pitch(0.125, dm);
                     }
                     PATTERN_SNARE => {
                         self.snare.trigger();
@@ -652,16 +659,18 @@ impl AmbientTechno {
                         self.pad.trigger_minor_chord(PAD_FREQS[idx]);
                     }
                     PATTERN_MONO => {
-                        self.mono.trigger(self.mono_seq_freqs[self.mono_step], self.mono_step % 3 == 0);
+                        let dm = drift_mul(PATTERN_MONO, self);
+                        self.mono.trigger(self.mono_seq_freqs[self.mono_step] * dm, self.mono_step % 3 == 0);
                         self.advance_mono_step();
                     }
                     PATTERN_CLAVE => {
                         self.clave.trigger_with_note("A6");
                     }
                     PATTERN_BASSLINE => {
+                        let dm = drift_mul(PATTERN_BASSLINE, self);
                         let step = (self.beat_count % 8 * 4) as usize;
                         if let Some(freq) = BASSLINE_PATTERN[step] {
-                            self.bass.trigger(freq, false);
+                            self.bass.trigger(freq * dm, false);
                         }
                         self.beat_count = self.beat_count.wrapping_add(1);
                     }
@@ -869,19 +878,18 @@ impl AmbientTechno {
             self.rim.trigger();
         }
 
-        let kick = self.kick.next_sample() + self.ghost_kick.next_sample();
+        // ── Per-voice DSP ──
+        let kick_dry = self.kick.next_sample() + self.ghost_kick.next_sample();
         let snare_dry = self.snare.next_sample();
-        let (snare_l, snare_r) = self.snare_reverb.process(snare_dry);
+        let (snare_rev_l, snare_rev_r) = self.snare_reverb.process(snare_dry);
         let ghost_snare_dry = self.ghost_snare.next_sample();
         let (ghost_snare_l, ghost_snare_r) = self.ghost_snare_reverb.process(ghost_snare_dry);
-        // Reverse reverb: rising noise swell fed into a long reverb, input cut at the hit.
         let rev_rev_input = if self.rev_rev_active {
             let white = self.rev_rev_noise.white();
             let f = (std::f32::consts::PI * 800.0 / self.sample_rate).sin() * 2.0;
             let high = white - self.rev_rev_bp_low - 0.4 * self.rev_rev_bp_band;
             self.rev_rev_bp_band += f * high;
             self.rev_rev_bp_low += f * self.rev_rev_bp_band;
-            // t² curve: starts near-silent, accelerates toward the hit
             let out = self.rev_rev_bp_band * (self.rev_rev_amp * self.rev_rev_amp * 0.25);
             self.rev_rev_amp = (self.rev_rev_amp + self.rev_rev_rise_rate).min(1.0);
             out
@@ -894,32 +902,80 @@ impl AmbientTechno {
         let (hat_l, hat_r) = self.hat_phaser.process(hat + closed_hat * 1.7);
         let rim_dry = self.rim.next_sample();
         let rim_echoed = self.rim_delay.process(rim_dry);
-        let (rim_l, rim_r) = self.rim_reverb.process(rim_echoed);
+        let (rim_rev_l, rim_rev_r) = self.rim_reverb.process(rim_echoed);
         let stab_filtered = self.stab_lpf.process(self.stab.next_sample());
         let (stab_dl, stab_dr) = self.stab_delay.process(stab_filtered);
-        let (stab_l, stab_r) = self.stab_phaser.process((stab_dl + stab_dr) * 0.5);
+        let (stab_eff_l, stab_eff_r) = self.stab_phaser.process((stab_dl + stab_dr) * 0.5);
         let stab2_filtered = self.stab2_lpf.process(self.stab2.next_sample());
-        let (stab2_l, stab2_r) = self.stab2_delay.process(stab2_filtered);
+        let (stab2_dl, stab2_dr) = self.stab2_delay.process(stab2_filtered);
         let stab3_filtered = self.stab3_lpf.process(self.stab3.next_sample());
-        let (stab3_l, stab3_r) = self.stab3_reverb.process(stab3_filtered);
+        let (stab3_rev_l, stab3_rev_r) = self.stab3_reverb.process(stab3_filtered);
         let pad_filtered = self.pad_lpf.process(self.pad.next_sample());
         let pad_chorused = self.pad_chorus.process(pad_filtered);
-        let (pad_l, pad_r) = self.pad_reverb.process(pad_chorused);
+        let (pad_rev_l, pad_rev_r) = self.pad_reverb.process(pad_chorused);
         let mono_dry = self.mono.next_sample();
         let (mono_rev_l, mono_rev_r) = self.mono_reverb.process(mono_dry);
-        let mono_l = mono_dry + mono_rev_l * 0.25;
-        let mono_r = mono_dry + mono_rev_r * 0.25;
         let clave_dry = self.clave.next_sample();
         let (clave_dl, clave_dr) = self.clave_delay.process(clave_dry);
-        let (clave_l, clave_r) = self.clave_reverb.process((clave_dl + clave_dr) * 0.5);
+        let (clave_rev_l, clave_rev_r) = self.clave_reverb.process((clave_dl + clave_dr) * 0.5);
         let bass_dry = self.bass.next_sample();
         let (bass_rev_l, bass_rev_r) = self.bass_reverb.process(bass_dry);
-        let bass_l = bass_dry + bass_rev_l * 0.08;
-        let bass_r = bass_dry + bass_rev_r * 0.08;
 
-        // Kick centre, snare centre, hat panned slightly left, closed hat centre, rim slightly right, stabs, pad and mono centre
-        let mut left = kick + snare_l * 0.425 + ghost_snare_l * 0.3 + rev_rev_l * 0.25 + hat_l * 0.7 + rim_l * 0.8 + stab_l * 0.6 + stab2_l * 0.6 + stab3_l * 0.7 + pad_l + mono_l * 0.09375 + clave_l * 0.5 + bass_l * 0.09;
-        let mut right = kick + snare_r * 0.425 + ghost_snare_r * 0.3 + rev_rev_r * 0.25 + hat_r * 0.7 + rim_r * 0.8 + stab_r * 0.6 + stab2_r * 0.6 + stab3_r * 0.7 + pad_r + mono_r * 0.09375 + clave_r * 0.5 + bass_r * 0.09;
+        // ── Apply pond modifiers ──
+        // Haze: blend reverb wet level (0.0 = normal, 1.0 = drenched)
+        let kick_haze = self.pond_mod_lfo(PATTERN_KICK, MOD_HAZE);
+        let snare_haze = self.pond_mod_lfo(PATTERN_SNARE, MOD_HAZE);
+        let hats_haze = self.pond_mod_lfo(PATTERN_HATS, MOD_HAZE);
+        let rim_haze = self.pond_mod_lfo(PATTERN_RIM, MOD_HAZE);
+        let stab1_haze = self.pond_mod_lfo(PATTERN_STAB1, MOD_HAZE);
+        let pad_haze = self.pond_mod_lfo(PATTERN_PAD, MOD_HAZE);
+        let mono_haze = self.pond_mod_lfo(PATTERN_MONO, MOD_HAZE);
+        let bass_haze = self.pond_mod_lfo(PATTERN_BASSLINE, MOD_HAZE);
+
+        // Fade: amplitude breathing
+        let kick_fade = 1.0 - self.pond_mod_lfo(PATTERN_KICK, MOD_FADE) * 0.6;
+        let snare_fade = 1.0 - self.pond_mod_lfo(PATTERN_SNARE, MOD_FADE) * 0.6;
+        let hats_fade = 1.0 - self.pond_mod_lfo(PATTERN_HATS, MOD_FADE) * 0.6;
+        let rim_fade = 1.0 - self.pond_mod_lfo(PATTERN_RIM, MOD_FADE) * 0.6;
+        let stab1_fade = 1.0 - self.pond_mod_lfo(PATTERN_STAB1, MOD_FADE) * 0.6;
+        let stab2_fade = 1.0 - self.pond_mod_lfo(PATTERN_STAB2, MOD_FADE) * 0.6;
+        let stab3_fade = 1.0 - self.pond_mod_lfo(PATTERN_STAB3, MOD_FADE) * 0.6;
+        let pad_fade = 1.0 - self.pond_mod_lfo(PATTERN_PAD, MOD_FADE) * 0.6;
+        let mono_fade = 1.0 - self.pond_mod_lfo(PATTERN_MONO, MOD_FADE) * 0.6;
+        let clave_fade = 1.0 - self.pond_mod_lfo(PATTERN_CLAVE, MOD_FADE) * 0.6;
+        let bass_fade = 1.0 - self.pond_mod_lfo(PATTERN_BASSLINE, MOD_FADE) * 0.6;
+
+        // Echo: scale delay/reverb wet blend (existing echoes + LFO boost)
+        let stab1_echo = 1.0 + self.pond_mod_lfo(PATTERN_STAB1, MOD_ECHO) * 1.5;
+        let stab2_echo = 1.0 + self.pond_mod_lfo(PATTERN_STAB2, MOD_ECHO) * 1.5;
+        let rim_echo = 1.0 + self.pond_mod_lfo(PATTERN_RIM, MOD_ECHO) * 1.5;
+        let clave_echo = 1.0 + self.pond_mod_lfo(PATTERN_CLAVE, MOD_ECHO) * 1.5;
+
+        // Mix with modifiers applied
+        let kick_out = kick_dry * kick_fade;
+        let snare_l = (snare_dry + snare_rev_l * (0.3 + snare_haze * 0.7)) * snare_fade;
+        let snare_r = (snare_dry + snare_rev_r * (0.3 + snare_haze * 0.7)) * snare_fade;
+        let hat_out_l = hat_l * hats_fade;
+        let hat_out_r = hat_r * hats_fade;
+        let rim_l = (rim_dry + rim_rev_l * (0.8 + rim_haze * 0.5)) * rim_fade * rim_echo;
+        let rim_r = (rim_dry + rim_rev_r * (0.8 + rim_haze * 0.5)) * rim_fade * rim_echo;
+        let stab_l = stab_eff_l * stab1_fade * stab1_echo;
+        let stab_r = stab_eff_r * stab1_fade * stab1_echo;
+        let stab2_l = stab2_dl * stab2_fade * stab2_echo;
+        let stab2_r = stab2_dr * stab2_fade * stab2_echo;
+        let stab3_l = (stab3_filtered + stab3_rev_l * (0.6 + self.pond_mod_lfo(PATTERN_STAB3, MOD_HAZE) * 0.4)) * stab3_fade;
+        let stab3_r = (stab3_filtered + stab3_rev_r * (0.6 + self.pond_mod_lfo(PATTERN_STAB3, MOD_HAZE) * 0.4)) * stab3_fade;
+        let pad_l = (pad_chorused + pad_rev_l * (0.5 + pad_haze * 0.5)) * pad_fade;
+        let pad_r = (pad_chorused + pad_rev_r * (0.5 + pad_haze * 0.5)) * pad_fade;
+        let mono_l = (mono_dry + mono_rev_l * (0.25 + mono_haze * 0.5)) * mono_fade;
+        let mono_r = (mono_dry + mono_rev_r * (0.25 + mono_haze * 0.5)) * mono_fade;
+        let clave_l = (clave_dl + clave_rev_l * (0.5 + self.pond_mod_lfo(PATTERN_CLAVE, MOD_HAZE) * 0.5)) * clave_fade * clave_echo;
+        let clave_r = (clave_dr + clave_rev_r * (0.5 + self.pond_mod_lfo(PATTERN_CLAVE, MOD_HAZE) * 0.5)) * clave_fade * clave_echo;
+        let bass_l = (bass_dry + bass_rev_l * (0.08 + bass_haze * 0.3)) * bass_fade;
+        let bass_r = (bass_dry + bass_rev_r * (0.08 + bass_haze * 0.3)) * bass_fade;
+
+        let mut left = kick_out + snare_l * 0.425 + ghost_snare_l * 0.3 + rev_rev_l * 0.25 + hat_out_l * 0.7 + rim_l * 0.8 + stab_l * 0.6 + stab2_l * 0.6 + stab3_l * 0.7 + pad_l + mono_l * 0.09375 + clave_l * 0.5 + bass_l * 0.09;
+        let mut right = kick_out + snare_r * 0.425 + ghost_snare_r * 0.3 + rev_rev_r * 0.25 + hat_out_r * 0.7 + rim_r * 0.8 + stab_r * 0.6 + stab2_r * 0.6 + stab3_r * 0.7 + pad_r + mono_r * 0.09375 + clave_r * 0.5 + bass_r * 0.09;
 
         // Peak limiter
         let peak = left.abs().max(right.abs());
@@ -1226,6 +1282,33 @@ mod tests {
 
         // At 2.16 Hz over 2 seconds, expect roughly 4 triggers (give or take)
         assert!(peak_count >= 2, "expected multiple kick triggers at 9/5 ratio, got {}", peak_count);
+    }
+
+    #[test]
+    fn all_modifiers_active_stays_bounded() {
+        let mut engine = AmbientTechno::new(44100, 42);
+        // Unmute all voices across all ponds, activate all modifiers
+        let voices = ["kick", "snare", "hats", "rim", "stab1", "stab2",
+                       "stab3", "pad", "mono", "clave", "bass"];
+        for (i, v) in voices.iter().enumerate() {
+            engine.set_param(&format!("{}_mute", v), 0.0);
+            engine.set_param(&format!("{}_ratio", v), (i % 5) as f32);
+        }
+        let mods = ["haze", "drift", "sweep", "echo", "fade"];
+        for p in 0..5 {
+            for m in &mods {
+                engine.set_param(&format!("pond_{}_{}", p, m), 1.0);
+            }
+        }
+
+        let mut left = vec![0.0f32; 4096];
+        let mut right = vec![0.0f32; 4096];
+        for _ in 0..50 {
+            engine.render(&mut left, &mut right);
+            for &s in left.iter().chain(right.iter()) {
+                assert!(s.abs() <= 1.0, "sample {} exceeds [-1, 1] with all modifiers", s);
+            }
+        }
     }
 
     #[test]
