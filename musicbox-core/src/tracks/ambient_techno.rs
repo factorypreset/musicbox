@@ -147,6 +147,23 @@ fn swing_offset(beat_duration: u32) -> u32 { beat_duration / 12 }
 /// Chosen so LCM of denominators creates long resolution period.
 const RIM_RATIO: (f32, f32) = (9.0, 5.0);    // 9/5 base → 2.160 Hz — drifts against kick
 
+const NUM_PONDS: usize = 5;
+const NUM_MODIFIERS: usize = 5;
+const MOD_HAZE:  usize = 0;
+const MOD_DRIFT: usize = 1;
+const MOD_SWEEP: usize = 2;
+const MOD_ECHO:  usize = 3;
+const MOD_FADE:  usize = 4;
+
+/// LFO rates for each modifier — slightly irrational so they never sync.
+const MOD_LFO_RATES: [f32; NUM_MODIFIERS] = [
+    0.05,   // haze:  ~20s cycle
+    0.1,    // drift: ~10s cycle
+    0.08,   // sweep: ~12.5s cycle
+    0.07,   // echo:  ~14.3s cycle
+    0.06,   // fade:  ~16.7s cycle
+];
+
 /// Available ratios for groovebox ratio assignment.
 const RATIOS: [(f32, f32); 5] = [
     (1.0, 1.0),  // 1/1 → 1.200 Hz
@@ -247,6 +264,9 @@ pub struct AmbientTechno {
     user_active: [bool; NUM_PATTERNS],
     user_controlled: bool,
     voice_pulses: [PulseOscillator; NUM_PATTERNS],
+    voice_pond: [usize; NUM_PATTERNS],
+    pond_modifiers: [[bool; NUM_MODIFIERS]; NUM_PONDS],
+    pond_lfo_phase: [[f32; NUM_MODIFIERS]; NUM_PONDS],
     sample_rate: f32,
     limiter_gain: f32,
     fade_pos: u32,
@@ -348,6 +368,9 @@ impl AmbientTechno {
             user_active: [false; NUM_PATTERNS],
             user_controlled: false,
             voice_pulses: std::array::from_fn(|_| PulseOscillator::new(BASE_FREQ, sr)),
+            voice_pond: [0; NUM_PATTERNS],
+            pond_modifiers: [[false; NUM_MODIFIERS]; NUM_PONDS],
+            pond_lfo_phase: [[0.0; NUM_MODIFIERS]; NUM_PONDS],
             sample_rate: sr,
             limiter_gain: 1.0,
             fade_pos: 0,
@@ -444,6 +467,30 @@ impl AmbientTechno {
         self.fade_pos as f32 / self.fade_samples as f32
     }
 
+    fn advance_pond_lfos(&mut self) {
+        for p in 0..NUM_PONDS {
+            for m in 0..NUM_MODIFIERS {
+                if self.pond_modifiers[p][m] {
+                    self.pond_lfo_phase[p][m] += MOD_LFO_RATES[m] / self.sample_rate;
+                    if self.pond_lfo_phase[p][m] >= 1.0 {
+                        self.pond_lfo_phase[p][m] -= 1.0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns the LFO value (0.0–1.0) for a modifier on a given voice's pond.
+    /// Returns 0.0 if the modifier is not active on that pond.
+    fn pond_mod_lfo(&self, pattern: usize, modifier: usize) -> f32 {
+        if !self.user_controlled { return 0.0; }
+        let pond = self.voice_pond[pattern];
+        if !self.pond_modifiers[pond][modifier] { return 0.0; }
+        let phase = self.pond_lfo_phase[pond][modifier];
+        // Unipolar sine: 0.0 to 1.0
+        (phase * std::f32::consts::TAU).sin() * 0.5 + 0.5
+    }
+
     fn is_active(&self, pattern: usize) -> bool {
         if self.user_controlled {
             self.user_active[pattern]
@@ -493,6 +540,31 @@ impl AmbientTechno {
             let ri = (value as usize).min(RATIOS.len() - 1);
             let freq = BASE_FREQ * RATIOS[ri].0 / RATIOS[ri].1;
             self.voice_pulses[i].set_freq(freq);
+            self.voice_pond[i] = ri;
+            return;
+        }
+
+        // Pond modifier params: "pond_0_haze", "pond_2_echo", etc.
+        if name.starts_with("pond_") && name.len() > 7 {
+            let pond_idx = match name.as_bytes()[5] {
+                b'0' => Some(0usize),
+                b'1' => Some(1),
+                b'2' => Some(2),
+                b'3' => Some(3),
+                b'4' => Some(4),
+                _ => None,
+            };
+            let mod_idx = match &name[7..] {
+                "haze" => Some(MOD_HAZE),
+                "drift" => Some(MOD_DRIFT),
+                "sweep" => Some(MOD_SWEEP),
+                "echo" => Some(MOD_ECHO),
+                "fade" => Some(MOD_FADE),
+                _ => None,
+            };
+            if let (Some(p), Some(m)) = (pond_idx, mod_idx) {
+                self.pond_modifiers[p][m] = value >= 0.5;
+            }
         }
     }
 
@@ -527,6 +599,8 @@ impl AmbientTechno {
         if self.fade_state == State::Done {
             return (0.0, 0.0);
         }
+
+        self.advance_pond_lfos();
 
         let beat_duration = (self.sample_rate / BASE_FREQ) as u32;
         let ticks = self.clock.tick();
@@ -1172,6 +1246,46 @@ mod tests {
                 assert!(s.abs() <= 1.0, "sample {} exceeds [-1, 1] range", s);
             }
         }
+    }
+
+    #[test]
+    fn set_param_pond_modifier() {
+        let mut engine = AmbientTechno::new(44100, 42);
+        engine.set_param("kick_mute", 0.0);   // unmute kick
+        engine.set_param("kick_ratio", 0.0);   // pond 0
+
+        // Activate haze on pond 0
+        engine.set_param("pond_0_haze", 1.0);
+        assert!(engine.pond_modifiers[0][MOD_HAZE]);
+        assert!(!engine.pond_modifiers[0][MOD_DRIFT]);
+        assert!(!engine.pond_modifiers[1][MOD_HAZE]);
+
+        // Verify voice_pond tracking
+        assert_eq!(engine.voice_pond[PATTERN_KICK], 0);
+        engine.set_param("kick_ratio", 3.0);   // move to pond 3
+        assert_eq!(engine.voice_pond[PATTERN_KICK], 3);
+
+        // Deactivate haze
+        engine.set_param("pond_0_haze", 0.0);
+        assert!(!engine.pond_modifiers[0][MOD_HAZE]);
+    }
+
+    #[test]
+    fn pond_lfo_advances_when_modifier_active() {
+        let mut engine = AmbientTechno::new(44100, 42);
+        engine.set_param("kick_mute", 0.0);
+        engine.set_param("pond_0_haze", 1.0);
+
+        // Render a bit to advance LFOs
+        let mut left = vec![0.0f32; 4096];
+        let mut right = vec![0.0f32; 4096];
+        engine.render(&mut left, &mut right);
+
+        // Haze LFO on pond 0 should have advanced
+        assert!(engine.pond_lfo_phase[0][MOD_HAZE] > 0.0,
+            "haze LFO should have advanced");
+        // Drift LFO on pond 0 should not have advanced (not active)
+        assert_eq!(engine.pond_lfo_phase[0][MOD_DRIFT], 0.0);
     }
 
     #[test]
