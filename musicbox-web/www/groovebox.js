@@ -2,6 +2,8 @@
 // Concentric orbit rings representing polyrhythmic ratios.
 // Voice sigils can be dragged onto rings to activate, or back to dock to mute.
 
+(function() {
+
 const ORBITS = [
   { label: '1/1',  hz: 1.2,    radius: 160 },
   { label: '7/4',  hz: 2.1,    radius: 128 },
@@ -372,3 +374,5 @@ window.groovebox = {
   getPlacements: () => placements,
   VOICES,
 };
+
+})();
